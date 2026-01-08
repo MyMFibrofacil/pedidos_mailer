@@ -1,67 +1,103 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
+from typing import List, Optional
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
 
-app = FastAPI(title="Pedidos Mailer", version="1.0.0")
+app = FastAPI(
+    title="Pedidos Mailer",
+    version="1.0.0"
+)
+
+# =========================
+# MODELOS
+# =========================
 
 class OrderItem(BaseModel):
     producto: str
     cantidad: int
-    precio_unitario: float | None = None
+    precio_unitario: Optional[float] = None
+
 
 class OrderPayload(BaseModel):
     order_id: str
     cliente_nombre: str
-    cliente_email: EmailStr | None = None
-    cliente_telefono: str | None = None
-    notas: str | None = None
-    items: list[OrderItem]
-    total: float | None = None
+    cliente_email: Optional[EmailStr] = None
+    cliente_telefono: Optional[str] = None
+    notas: Optional[str] = None
+    items: List[OrderItem]
+    total: Optional[float] = None
+
+
+# =========================
+# EMAIL (SENDGRID API)
+# =========================
 
 def send_email(subject: str, html_body: str, to_email: str) -> None:
-    gmail_user = os.getenv("GMAIL_USER")
-    gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
-    mail_from_name = os.getenv("MAIL_FROM_NAME", "Asistente de Pedidos")
+    api_key = os.getenv("SENDGRID_API_KEY")
+    from_email = os.getenv("MAIL_FROM")
+    from_name = os.getenv("MAIL_FROM_NAME", "Pedidos")
 
-    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    use_ssl = os.getenv("SMTP_USE_SSL", "0").strip().lower() in {"1", "true", "yes"}
-    smtp_port = int(os.getenv("SMTP_PORT", "465" if use_ssl else "587"))
-    timeout = float(os.getenv("SMTP_TIMEOUT", "20"))
+    if not api_key:
+        raise RuntimeError("Falta SENDGRID_API_KEY")
+    if not from_email:
+        raise RuntimeError("Falta MAIL_FROM")
 
-    if not gmail_user or not gmail_app_password:
-        raise RuntimeError("Faltan GMAIL_USER o GMAIL_APP_PASSWORD en variables de entorno.")
+    url = "https://api.sendgrid.com/v3/mail/send"
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"{mail_from_name} <{gmail_user}>"
-    msg["To"] = to_email
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    payload = {
+        "personalizations": [
+            {
+                "to": [{"email": to_email}]
+            }
+        ],
+        "from": {
+            "email": from_email,
+            "name": from_name
+        },
+        "subject": subject,
+        "content": [
+            {
+                "type": "text/html",
+                "value": html_body
+            }
+        ]
+    }
 
-    if use_ssl:
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout) as server:
-            server.login(gmail_user, gmail_app_password)
-            server.sendmail(gmail_user, [to_email], msg.as_string())
-    else:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(gmail_user, gmail_app_password)
-            server.sendmail(gmail_user, [to_email], msg.as_string())
+    response = requests.post(
+        url,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        timeout=20
+    )
 
+    # SendGrid devuelve 202 cuando acepta el envío
+    if response.status_code not in (200, 202):
+        raise RuntimeError(
+            f"SendGrid error {response.status_code}: {response.text}"
+        )
+
+
+# =========================
+# HTML DEL PEDIDO
+# =========================
 
 def render_order_html(p: OrderPayload) -> str:
     rows = ""
-    for it in p.items:
-        pu = f"${it.precio_unitario:,.2f}" if it.precio_unitario is not None else "-"
+    for item in p.items:
+        pu = (
+            f"${item.precio_unitario:,.2f}"
+            if item.precio_unitario is not None
+            else "-"
+        )
         rows += f"""
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #eee;">{it.producto}</td>
-          <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">{it.cantidad}</td>
-          <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">{pu}</td>
+            <td style="padding:8px;border-bottom:1px solid #ddd;">{item.producto}</td>
+            <td style="padding:8px;border-bottom:1px solid #ddd;text-align:right;">{item.cantidad}</td>
+            <td style="padding:8px;border-bottom:1px solid #ddd;text-align:right;">{pu}</td>
         </tr>
         """
 
@@ -69,37 +105,56 @@ def render_order_html(p: OrderPayload) -> str:
 
     return f"""
     <div style="font-family:Arial,sans-serif;max-width:720px">
-      <h2>Nuevo pedido recibido: {p.order_id}</h2>
-      <p><b>Cliente:</b> {p.cliente_nombre}</p>
-      <p><b>Email:</b> {p.cliente_email or "-"}</p>
-      <p><b>Teléfono:</b> {p.cliente_telefono or "-"}</p>
-      <p><b>Notas:</b> {p.notas or "-"}</p>
+        <h2>Nuevo pedido recibido</h2>
 
-      <h3>Items</h3>
-      <table style="width:100%;border-collapse:collapse;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;">Producto</th>
-            <th style="text-align:right;padding:8px;border-bottom:2px solid #ddd;">Cantidad</th>
-            <th style="text-align:right;padding:8px;border-bottom:2px solid #ddd;">Precio Unit.</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows}
-        </tbody>
-      </table>
+        <p><b>ID Pedido:</b> {p.order_id}</p>
+        <p><b>Cliente:</b> {p.cliente_nombre}</p>
+        <p><b>Email:</b> {p.cliente_email or "-"}</p>
+        <p><b>Teléfono:</b> {p.cliente_telefono or "-"}</p>
+        <p><b>Notas:</b> {p.notas or "-"}</p>
 
-      <p style="margin-top:16px;"><b>Total:</b> {total}</p>
-      <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
-      <p style="color:#666;font-size:12px;">Generado automáticamente por el Asistente de Pedidos.</p>
+        <h3>Detalle del pedido</h3>
+
+        <table style="width:100%;border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align:left;padding:8px;border-bottom:2px solid #000;">Producto</th>
+                    <th style="text-align:right;padding:8px;border-bottom:2px solid #000;">Cantidad</th>
+                    <th style="text-align:right;padding:8px;border-bottom:2px solid #000;">Precio Unit.</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+
+        <p style="margin-top:16px;"><b>Total:</b> {total}</p>
+
+        <hr style="margin:24px 0;">
+        <p style="font-size:12px;color:#666;">
+            Generado automáticamente por el Asistente de Pedidos.
+        </p>
     </div>
     """
 
+
+# =========================
+# ENDPOINTS
+# =========================
+
+@app.get("/")
+def healthcheck():
+    return {"ok": True, "service": "pedidos-mailer"}
+
+
 @app.post("/send-order-email")
 def send_order_email(payload: OrderPayload):
-    to_email = os.getenv("GMAIL_TO")  # tu casilla destino
+    to_email = os.getenv("GMAIL_TO")
     if not to_email:
-        raise HTTPException(status_code=500, detail="Falta GMAIL_TO en variables de entorno.")
+        raise HTTPException(
+            status_code=500,
+            detail="Falta GMAIL_TO en variables de entorno"
+        )
 
     subject = f"Pedido {payload.order_id} - {payload.cliente_nombre}"
     html = render_order_html(payload)
