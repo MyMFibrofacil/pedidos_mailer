@@ -25,8 +25,11 @@ def send_email(subject: str, html_body: str, to_email: str) -> None:
     gmail_user = os.getenv("GMAIL_USER")
     gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
     mail_from_name = os.getenv("MAIL_FROM_NAME", "Asistente de Pedidos")
+
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "465"))
+    use_ssl = os.getenv("SMTP_USE_SSL", "0").strip().lower() in {"1", "true", "yes"}
+    smtp_port = int(os.getenv("SMTP_PORT", "465" if use_ssl else "587"))
+    timeout = float(os.getenv("SMTP_TIMEOUT", "20"))
 
     if not gmail_user or not gmail_app_password:
         raise RuntimeError("Faltan GMAIL_USER o GMAIL_APP_PASSWORD en variables de entorno.")
@@ -35,12 +38,20 @@ def send_email(subject: str, html_body: str, to_email: str) -> None:
     msg["Subject"] = subject
     msg["From"] = f"{mail_from_name} <{gmail_user}>"
     msg["To"] = to_email
-
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
-        server.login(gmail_user, gmail_app_password)
-        server.sendmail(gmail_user, [to_email], msg.as_string())
+    if use_ssl:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout) as server:
+            server.login(gmail_user, gmail_app_password)
+            server.sendmail(gmail_user, [to_email], msg.as_string())
+    else:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(gmail_user, gmail_app_password)
+            server.sendmail(gmail_user, [to_email], msg.as_string())
+
 
 def render_order_html(p: OrderPayload) -> str:
     rows = ""
